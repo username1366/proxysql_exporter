@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	log "github.com/sirupsen/logrus"
 	"net/http"
 	"os"
 	"time"
@@ -24,6 +25,10 @@ var (
 
 // Initialize gauges
 func init() {
+	switch os.Getenv("DEBUG") {
+	case "1", "true", "enabled":
+		log.SetLevel(log.DebugLevel)
+	}
 	connectionError = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "proxysql_conn_error",
@@ -70,37 +75,55 @@ func init() {
 func main() {
 	mysqlDSN := os.Getenv("MYSQL_DSN")
 	if len(mysqlDSN) < 1 {
-		fmt.Printf("MYSQL_DNS isn't set")
+		log.Errorf("MYSQL_DNS isn't set")
 		os.Exit(1)
 	}
 
 	socket := os.Getenv("SOCKET")
 	if len(socket) < 1 {
-		fmt.Printf("SOCKET isn't set")
+		log.Errorf("SOCKET isn't set")
 		os.Exit(1)
 	}
 
 	go GetStats(mysqlDSN)
 
-	fmt.Printf("Listen on %v\n", socket)
+	log.Printf("Listen on %v", socket)
 	http.Handle("/metrics", promhttp.Handler())
-	fmt.Println(http.ListenAndServe(socket, nil))
+	log.Println(http.ListenAndServe(socket, nil))
+}
+
+var globalDB *sql.DB
+
+func NewConnect(mysqlDSN string) (*sql.DB, error) {
+	var err error
+	if globalDB == nil {
+		globalDB, err = sql.Open("mysql", mysqlDSN)
+		if err != nil {
+			return nil, err
+		}
+		return globalDB, nil
+	}
+	log.Debugf("Reuse conncection")
+	return globalDB, nil
 }
 
 // GetStats retrieves stats from stats.stats_mysql_connection_pool table
 func GetStats(mysqlDSN string) {
+	var err error
+	var db *sql.DB
+	var rows *sql.Rows
 	for {
-		db, err := sql.Open("mysql", mysqlDSN)
+		db, err = NewConnect(mysqlDSN)
 		if err != nil {
-			fmt.Printf("DB connection error. Try in 5 seconds\n")
+			log.Errorf("DB connection error. %v. Try in 5 seconds", err)
 			up.With(prometheus.Labels{}).Set(float64(0))
 			time.Sleep(time.Second * 5)
 			continue
 		}
 
-		rows, err := db.Query("SELECT * FROM stats.stats_mysql_connection_pool")
+		rows, err = db.Query("SELECT * FROM stats.stats_mysql_connection_pool")
 		if err != nil {
-			fmt.Printf("Query execute error. Try in 5 seconds\n")
+			log.Errorf("Query execute error. %v. Try in 5 seconds", err)
 			up.With(prometheus.Labels{}).Set(float64(0))
 			time.Sleep(time.Second * 5)
 			continue
@@ -125,15 +148,13 @@ func GetStats(mysqlDSN string) {
 			)
 			err = rows.Scan(&hostgroup, &srvHost, &srvPort, &status, &ConnUsed, &ConnFree, &ConnOK, &ConnERR, &MaxConnUsed, &Queries, &QueriesGTIDSync, &BytesDataSent, &BytesDataRecv, &LatencyUs)
 			if err != nil {
-				fmt.Printf("Rows scan error. Try new query in 5 seconds\n")
+				log.Errorf("Rows scan error. Try new query in 5 seconds")
 				up.With(prometheus.Labels{}).Set(float64(0))
 				time.Sleep(time.Second * 5)
 				break
 			}
 
-			if len(os.Getenv("DEBUG")) > 0 {
-				fmt.Println(hostgroup, srvHost, srvPort, status, ConnUsed, ConnFree, ConnOK, ConnERR, MaxConnUsed, Queries, QueriesGTIDSync, BytesDataSent, BytesDataRecv, LatencyUs)
-			}
+			log.Debugln(hostgroup, srvHost, srvPort, status, ConnUsed, ConnFree, ConnOK, ConnERR, MaxConnUsed, Queries, QueriesGTIDSync, BytesDataSent, BytesDataRecv, LatencyUs)
 
 			connectionError.With(prometheus.Labels{
 				"hostgroup": fmt.Sprintf("%v", hostgroup),
@@ -179,7 +200,7 @@ func GetStats(mysqlDSN string) {
 
 			up.With(prometheus.Labels{}).Set(float64(1))
 		}
-		db.Close()
 		time.Sleep(time.Second * 5)
 	}
+	db.Close()
 }
