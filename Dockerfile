@@ -1,4 +1,4 @@
-FROM golang:1.20 as builder
+FROM golang:1.21 as builder
 
 ARG upx_version=4.0.0
 ARG GOPROXY
@@ -21,3 +21,5 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOPROXY=https://proxy.golang.org go bu
 FROM alpine:latest as proxysql-exporter
 WORKDIR /app
 COPY --from=builder /app/app .
+ENTRYPOINT ["/app/app"]
+CMD [""]
