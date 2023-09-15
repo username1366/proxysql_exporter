@@ -100,7 +100,7 @@ func init() {
 
 	countStar = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "proxysql_query_count_star",
+			Name: "proxysql_query_count_total",
 			Help: "the total number of times the query has been executed (with different values for the parameters)",
 		}, []string{"hostgroup", "schemaname", "digest", "digest_text"})
 	prometheus.MustRegister(countStar)
@@ -299,14 +299,14 @@ func GetStatQueryDigest(db *sql.DB) error {
 	var err error
 	var rows *sql.Rows
 
-	rows, err = db.Query("select hostgroup, schemaname, digest, digest_text, count_star, min_time, max_time from stats_mysql_query_digest order by max_time desc limit 10")
+	rows, err = db.Query("select ifnull(hg.comment, cast(qd.hostgroup as varchar)) as hostgroup, qd.schemaname, qd.digest, qd.digest_text, sum(qd.count_star) as count_star, min(qd.min_time) as min_time, max(qd.max_time) as max_time from stats_mysql_query_digest qd left join runtime_mysql_replication_hostgroups hg on qd.hostgroup = hg.writer_hostgroup or qd.hostgroup = hg.reader_hostgroup group by ifnull(hg.comment, cast(qd.hostgroup as varchar)), qd.schemaname, qd.digest, qd.digest_text order by qd.count_star desc limit 10")
 	if err != nil {
 		return err
 	}
 
 	for rows.Next() {
 		var (
-			hostgroup   int
+			hostgroup   string
 			schemaname  string
 			digest      string
 			digest_text string
@@ -322,21 +322,21 @@ func GetStatQueryDigest(db *sql.DB) error {
 		log.Debugln(hostgroup, schemaname, digest, digest_text, count_star, min_time, max_time)
 
 		countStar.With(prometheus.Labels{
-			"hostgroup":   fmt.Sprintf("%v", hostgroup),
+			"hostgroup":   hostgroup,
 			"schemaname":  schemaname,
 			"digest":      digest,
 			"digest_text": digest_text,
 		}).Set(float64(count_star))
 
 		minTime.With(prometheus.Labels{
-			"hostgroup":   fmt.Sprintf("%v", hostgroup),
+			"hostgroup":   hostgroup,
 			"schemaname":  schemaname,
 			"digest":      digest,
 			"digest_text": digest_text,
 		}).Set(float64(min_time))
 
 		maxTime.With(prometheus.Labels{
-			"hostgroup":   fmt.Sprintf("%v", hostgroup),
+			"hostgroup":   hostgroup,
 			"schemaname":  schemaname,
 			"digest":      digest,
 			"digest_text": digest_text,
