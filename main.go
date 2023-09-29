@@ -121,20 +121,21 @@ func init() {
 }
 
 func main() {
+	// Get environment variables for connecting to the database
 	mysqlDSN := os.Getenv("MYSQL_DSN")
 	if len(mysqlDSN) < 1 {
 		log.Errorf("MYSQL_DNS isn't set")
 		os.Exit(1)
 	}
-
+	// Get environment variables for publishing metrics
 	socket := os.Getenv("SOCKET")
 	if len(socket) < 1 {
 		log.Errorf("SOCKET isn't set")
 		os.Exit(1)
 	}
-
+	// start a routine for collecting metrics
 	go GetStats(mysqlDSN)
-
+	// publication of metrics
 	log.Printf("Listen on %v", socket)
 	http.Handle("/metrics", promhttp.Handler())
 	log.Println(http.ListenAndServe(socket, nil))
@@ -159,7 +160,6 @@ func NewConnect(mysqlDSN string) (*sql.DB, error) {
 func GetStats(mysqlDSN string) {
 	var err error
 	var db *sql.DB
-	// var result sql.Result
 	for {
 		db, err = NewConnect(mysqlDSN)
 		if err != nil {
@@ -168,16 +168,7 @@ func GetStats(mysqlDSN string) {
 			time.Sleep(time.Second * 9)
 			continue
 		}
-
-		// result, err = db.Exec("use stats")
-		// if err != nil {
-		// 	log.Errorf("Use database error. %v. Try in 5 seconds", err)
-		// 	up.With(prometheus.Labels{}).Set(float64(0))
-		// 	time.Sleep(time.Second * 5)
-		// 	continue
-		// }
-		// log.Debugf("result: %v", result)
-
+		// collection of metrics for MySQL connections
 		err = GetStatConnectionPool(db)
 		if err != nil {
 			log.Errorf("Query get connection_pool execute error: %v. Try in 9 seconds", err)
@@ -185,6 +176,7 @@ func GetStats(mysqlDSN string) {
 			time.Sleep(time.Second * 9)
 			continue
 		}
+		// collection of metrics for MySQL queries
 		err = GetStatQueryDigest(db)
 		if err != nil {
 			log.Errorf("Query get query_digest execute error: %v. Try in 9 seconds", err)
@@ -205,9 +197,8 @@ func GetStatConnectionPool(db *sql.DB) error {
 	var err error
 	var rows *sql.Rows
 
-	rows, err = db.Query("SELECT * FROM stats.stats_mysql_connection_pool")
+	rows, err = db.Query("select * from stats.stats_mysql_connection_pool")
 	if err != nil {
-		// log.Errorf("Query execute error: %v.", err)
 		return err
 	}
 
