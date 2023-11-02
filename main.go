@@ -142,13 +142,13 @@ func main() {
 	if Ok {
 		lIncludeQPattern = strings.Split(includeQPatterns, ",")
 	} else {
-		log.Printf("%s not set\n", "INCLUDE_QUERY_PATTERN")
+		log.Printf("%s not set", "INCLUDE_QUERY_PATTERN")
 	}
 	excludeQPatterns, Ok := os.LookupEnv("EXCLUDE_QUERY_PATTERN")
 	if Ok {
 		lExcludeQPattern = strings.Split(excludeQPatterns, ",")
 	} else {
-		log.Printf("%s not set\n", "EXCLUDE_QUERY_PATTERN")
+		log.Printf("%s not set", "EXCLUDE_QUERY_PATTERN")
 	}
 	// start a routine for collecting metrics
 	go GetStats(mysqlDSN, lIncludeQPattern, lExcludeQPattern)
@@ -194,7 +194,7 @@ func makeWhere(lPattern []string, entryType bool) string {
 				}
 				where += fmt.Sprintf("digest_text %s like %v", negation, strings.Trim(pattern, " "))
 			} else {
-				log.Errorf("The value of variable number %d from patternType=%v is empty\n", i, entryType)
+				log.Errorf("The value of variable number %d from patternType=%v is empty", i, entryType)
 				os.Exit(1)
 			}
 		}
