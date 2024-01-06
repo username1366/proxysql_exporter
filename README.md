@@ -3,7 +3,15 @@ Prometheus proxySQL exporter
 
 ```sh
 DEBUG=1 SOCKET=:9032 MYSQL_DSN="admin:password@tcp(localhost:1033)/stats" go run main.go
+
+```env
+# templates accept LIKE style sql syntax value
+# example: 'begin tran%', 'select [0-9]'
+INCLUDE_QUERY_PATTERN - query templates to include in metrics
+EXCLUDE_QUERY_PATTERN - query templates to exclude from metrics
+
 ```
+entryType: true - include | flase - exclude query pattern
 
 # list of supported metrics
 ```

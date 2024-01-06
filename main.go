@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -13,6 +14,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+var globalDB *sql.DB
 
 var (
 	up              *prometheus.GaugeVec
@@ -121,26 +124,39 @@ func init() {
 }
 
 func main() {
+	var lIncludeQPattern []string
+	var lExcludeQPattern []string
+	// Get environment variables for connecting to the database
 	mysqlDSN := os.Getenv("MYSQL_DSN")
 	if len(mysqlDSN) < 1 {
 		log.Errorf("MYSQL_DNS isn't set")
 		os.Exit(1)
 	}
-
+	// Get environment variables for publishing metrics
 	socket := os.Getenv("SOCKET")
 	if len(socket) < 1 {
 		log.Errorf("SOCKET isn't set")
 		os.Exit(1)
 	}
-
-	go GetStats(mysqlDSN)
-
+	includeQPatterns, Ok := os.LookupEnv("INCLUDE_QUERY_PATTERN")
+	if Ok {
+		lIncludeQPattern = strings.Split(includeQPatterns, ",")
+	} else {
+		log.Printf("%s not set", "INCLUDE_QUERY_PATTERN")
+	}
+	excludeQPatterns, Ok := os.LookupEnv("EXCLUDE_QUERY_PATTERN")
+	if Ok {
+		lExcludeQPattern = strings.Split(excludeQPatterns, ",")
+	} else {
+		log.Printf("%s not set", "EXCLUDE_QUERY_PATTERN")
+	}
+	// start a routine for collecting metrics
+	go GetStats(mysqlDSN, lIncludeQPattern, lExcludeQPattern)
+	// publication of metrics
 	log.Printf("Listen on %v", socket)
 	http.Handle("/metrics", promhttp.Handler())
 	log.Println(http.ListenAndServe(socket, nil))
 }
-
-var globalDB *sql.DB
 
 func NewConnect(mysqlDSN string) (*sql.DB, error) {
 	var err error
@@ -155,11 +171,42 @@ func NewConnect(mysqlDSN string) (*sql.DB, error) {
 	return globalDB, nil
 }
 
+func makeWhere(lPattern []string, entryType bool) string {
+	var (
+		where    string
+		union    string
+		negation string
+	)
+
+	if entryType {
+		union = "or"
+		negation = ""
+	} else {
+		union = "and"
+		negation = "not"
+	}
+	if len(lPattern) != 0 {
+		where += "and ("
+		for i, pattern := range lPattern {
+			if len(pattern) != 0 {
+				if i != 0 {
+					where += fmt.Sprintf(" %s ", union)
+				}
+				where += fmt.Sprintf("digest_text %s like %v", negation, strings.Trim(pattern, " "))
+			} else {
+				log.Errorf("The value of variable number %d from patternType=%v is empty", i, entryType)
+				os.Exit(1)
+			}
+		}
+		where += ")"
+	}
+	return where
+}
+
 // Get statistics from memory DB proxysql
-func GetStats(mysqlDSN string) {
+func GetStats(mysqlDSN string, lIncludeQPattern []string, lExcludeQPattern []string) {
 	var err error
 	var db *sql.DB
-	// var result sql.Result
 	for {
 		db, err = NewConnect(mysqlDSN)
 		if err != nil {
@@ -168,16 +215,7 @@ func GetStats(mysqlDSN string) {
 			time.Sleep(time.Second * 9)
 			continue
 		}
-
-		// result, err = db.Exec("use stats")
-		// if err != nil {
-		// 	log.Errorf("Use database error. %v. Try in 5 seconds", err)
-		// 	up.With(prometheus.Labels{}).Set(float64(0))
-		// 	time.Sleep(time.Second * 5)
-		// 	continue
-		// }
-		// log.Debugf("result: %v", result)
-
+		// collection of metrics for MySQL connections
 		err = GetStatConnectionPool(db)
 		if err != nil {
 			log.Errorf("Query get connection_pool execute error: %v. Try in 9 seconds", err)
@@ -185,7 +223,8 @@ func GetStats(mysqlDSN string) {
 			time.Sleep(time.Second * 9)
 			continue
 		}
-		err = GetStatQueryDigest(db)
+		// collection of metrics for MySQL queries
+		err = GetStatQueryDigest(db, lIncludeQPattern, lExcludeQPattern)
 		if err != nil {
 			log.Errorf("Query get query_digest execute error: %v. Try in 9 seconds", err)
 			up.With(prometheus.Labels{}).Set(float64(0))
@@ -205,15 +244,20 @@ func GetStatConnectionPool(db *sql.DB) error {
 	var err error
 	var rows *sql.Rows
 
-	rows, err = db.Query("SELECT * FROM stats.stats_mysql_connection_pool")
+	sql := fmt.Sprint(`select ifnull(hg.comment, cast(cp.hostgroup as varchar)) as hostgroup,
+		cp.srv_host, cp.srv_port, cp.status, cp.ConnUsed, cp.ConnFree, cp.ConnOK, cp.ConnERR, cp.MaxConnUsed, cp.Queries, cp.Queries_GTID_sync, cp.Bytes_data_sent, cp.Bytes_data_recv, cp.Latency_us
+	from stats.stats_mysql_connection_pool cp
+		left join runtime_mysql_replication_hostgroups hg on cp.hostgroup = hg.writer_hostgroup or cp.hostgroup = hg.reader_hostgroup`)
+	log.Debugln(sql)
+
+	rows, err = db.Query(sql)
 	if err != nil {
-		// log.Errorf("Query execute error: %v.", err)
 		return err
 	}
 
 	for rows.Next() {
 		var (
-			hostgroup       int
+			hostgroup       string
 			srvHost         string
 			srvPort         int
 			status          string
@@ -236,56 +280,56 @@ func GetStatConnectionPool(db *sql.DB) error {
 		log.Debugln(hostgroup, srvHost, srvPort, status, ConnUsed, ConnFree, ConnOK, ConnERR, MaxConnUsed, Queries, QueriesGTIDSync, BytesDataSent, BytesDataRecv, LatencyUs)
 
 		connectionError.With(prometheus.Labels{
-			"hostgroup": fmt.Sprintf("%v", hostgroup),
+			"hostgroup": hostgroup,
 			"srv_host":  srvHost,
 			"srv_port":  fmt.Sprintf("%v", srvPort),
 			"status":    status,
 		}).Set(float64(ConnERR))
 
 		connectionOK.With(prometheus.Labels{
-			"hostgroup": fmt.Sprintf("%v", hostgroup),
+			"hostgroup": hostgroup,
 			"srv_host":  srvHost,
 			"srv_port":  fmt.Sprintf("%v", srvPort),
 			"status":    status,
 		}).Set(float64(ConnOK))
 
 		connectionUsed.With(prometheus.Labels{
-			"hostgroup": fmt.Sprintf("%v", hostgroup),
+			"hostgroup": hostgroup,
 			"srv_host":  srvHost,
 			"srv_port":  fmt.Sprintf("%v", srvPort),
 			"status":    status,
 		}).Set(float64(ConnUsed))
 
 		connectionFree.With(prometheus.Labels{
-			"hostgroup": fmt.Sprintf("%v", hostgroup),
+			"hostgroup": hostgroup,
 			"srv_host":  srvHost,
 			"srv_port":  fmt.Sprintf("%v", srvPort),
 			"status":    status,
 		}).Set(float64(ConnFree))
 
 		queries.With(prometheus.Labels{
-			"hostgroup": fmt.Sprintf("%v", hostgroup),
+			"hostgroup": hostgroup,
 			"srv_host":  srvHost,
 			"srv_port":  fmt.Sprintf("%v", srvPort),
 			"status":    status,
 		}).Set(float64(Queries))
 
 		sentBytes.With(prometheus.Labels{
-			"hostgroup": fmt.Sprintf("%v", hostgroup),
+			"hostgroup": hostgroup,
 			"srv_host":  srvHost,
 			"srv_port":  fmt.Sprintf("%v", srvPort),
 			"status":    status,
 		}).Set(float64(BytesDataSent))
 
 		recvBytes.With(prometheus.Labels{
-			"hostgroup": fmt.Sprintf("%v", hostgroup),
+			"hostgroup": hostgroup,
 			"srv_host":  srvHost,
 			"srv_port":  fmt.Sprintf("%v", srvPort),
 			"status":    status,
 		}).Set(float64(BytesDataRecv))
 
 		latencyNs.With(prometheus.Labels{
-			"hostgroup": fmt.Sprintf("%v", hostgroup),
+			"hostgroup": hostgroup,
 			"srv_host":  srvHost,
 			"srv_port":  fmt.Sprintf("%v", srvPort),
 			"status":    status,
@@ -295,11 +339,25 @@ func GetStatConnectionPool(db *sql.DB) error {
 }
 
 // retrieves stats from stats.stats_mysql_query_digest table
-func GetStatQueryDigest(db *sql.DB) error {
+func GetStatQueryDigest(db *sql.DB, lIncludeQPattern []string, lExcludeQPattern []string) error {
 	var err error
 	var rows *sql.Rows
 
-	rows, err = db.Query("select ifnull(hg.comment, cast(qd.hostgroup as varchar)) as hostgroup, qd.schemaname, qd.digest, qd.digest_text, sum(qd.count_star) as count_star, min(qd.min_time) as min_time, max(qd.max_time) as max_time from stats_mysql_query_digest qd left join runtime_mysql_replication_hostgroups hg on qd.hostgroup = hg.writer_hostgroup or qd.hostgroup = hg.reader_hostgroup group by ifnull(hg.comment, cast(qd.hostgroup as varchar)), qd.schemaname, qd.digest, qd.digest_text order by qd.count_star desc limit 10")
+	sql := fmt.Sprintf(`select ifnull(hg.comment, cast(qd.hostgroup as varchar)) as hostgroup,
+		qd.schemaname,
+		qd.digest,
+		qd.digest_text,
+		sum(qd.count_star) as count_star,
+		min(qd.min_time) as min_time,
+		max(qd.max_time) as max_time
+	from stats_mysql_query_digest qd
+		left join runtime_mysql_replication_hostgroups hg on qd.hostgroup = hg.writer_hostgroup or qd.hostgroup = hg.reader_hostgroup
+	where (1=1) %s %s 
+	group by ifnull(hg.comment, cast(qd.hostgroup as varchar)), qd.schemaname, qd.digest, qd.digest_text order by qd.count_star desc
+	limit 10`, makeWhere(lIncludeQPattern, true), makeWhere(lExcludeQPattern, false))
+	log.Debugln(sql)
+
+	rows, err = db.Query(sql)
 	if err != nil {
 		return err
 	}
